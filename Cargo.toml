@@ -18,7 +18,19 @@ embassy-rp = { version = "0.9.0", features = [
   "boot2-w25q080",
 ] }
 embassy-time = "0.5.0"
+
+static_cell = "2.1.1"
+portable-atomic = { version = "1.13", features = ["critical-section"] }
+cyw43 = "0.6.0"
+cyw43-pio = "0.9.0"
 panic-halt = "1.0.0"
+
+defmt = { version = "1.0.1", optional = true }
+defmt-rtt = { version = "1.1.0", optional = true }
+panic-probe = { version = "1.0.0", features = ["print-defmt"], optional = true }
+
+[features]
+probe = ["dep:panic-probe", "dep:defmt", "dep:defmt-rtt"]
 
 
 [profile.release]
