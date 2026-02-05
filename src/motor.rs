@@ -39,6 +39,7 @@ type RightMotor = (
 /// 1 => max speed
 /// 0 => motor off
 /// -1 => max reverse speed
+#[derive(Copy, Clone)]
 pub struct Speed(f32);
 impl Speed {
     const OFF: Self = Speed(0.);
