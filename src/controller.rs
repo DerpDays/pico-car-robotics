@@ -1,6 +1,7 @@
 use embassy_rp::Peri;
-use embassy_rp::peripherals::{PIN_9, PIN_11, PWM_SLICE4, PWM_SLICE5};
-use embassy_rp::pwm::Pwm;
+use embassy_rp::gpio::Input;
+use embassy_rp::peripherals::{PIN_9, PIN_11};
+use embassy_time::Instant;
 
 use crate::motor::Speed;
 
@@ -9,47 +10,34 @@ pub struct Controller {
     throttle: Throttle,
 }
 
-type SteeringPeripherals = (Peri<'static, PWM_SLICE4>, Peri<'static, PIN_9>);
-type ThrottlePeripherals = (Peri<'static, PWM_SLICE5>, Peri<'static, PIN_11>);
+type SteeringPin = Peri<'static, PIN_9>;
+type ThrottlePin = Peri<'static, PIN_11>;
 
 impl Controller {
-    pub fn init(steering: SteeringPeripherals, throttle: ThrottlePeripherals) -> Self {
+    pub fn init(steering: SteeringPin, throttle: ThrottlePin) -> Self {
         Self {
-            steering: Steering::init(steering.0, steering.1),
-            throttle: Throttle::init(throttle.0, throttle.1),
+            steering: Steering::init(steering),
+            throttle: Throttle::init(throttle),
         }
     }
-    pub fn get_throttle(&self) -> Speed {
-        self.throttle.get()
+    pub async fn get_throttle(&mut self) -> Speed {
+        self.throttle.get().await
     }
-    pub fn get_steering(&self) -> Speed {
-        self.throttle.get()
+    pub async fn get_steering(&mut self) -> f32 {
+        self.steering.get().await
     }
 }
 
-struct Steering(Pwm<'static>);
+struct Steering(Input<'static>);
 impl Steering {
-    fn init(pwm_slice: Peri<'static, PWM_SLICE4>, pwm_pin: Peri<'static, PIN_9>) -> Self {
-        let pwm_clock = embassy_rp::clocks::clk_sys_freq();
-        let divider: u8 = 16;
-        let freq = 100;
-        let top = (pwm_clock / (freq * divider as u32)) - 1;
-        let mut c = embassy_rp::pwm::Config::default();
-        c.top = top as u16;
-        c.divider = divider.into();
-        let steering = Pwm::new_input(
-            pwm_slice,
-            pwm_pin,
-            embassy_rp::gpio::Pull::None,
-            embassy_rp::pwm::InputMode::Level,
-            c.clone(),
-        );
-        Steering(steering)
+    fn init(pin: SteeringPin) -> Self {
+        Steering(Input::new(pin, embassy_rp::gpio::Pull::None))
     }
+
     fn map_steering(pulse_us: i32) -> f32 {
-        const MIN_US: i32 = 1000;
-        const MID_US: i32 = 1500;
-        const MAX_US: i32 = 2000;
+        const MIN_US: i32 = 1100;
+        const MID_US: i32 = 1450;
+        const MAX_US: i32 = 1800;
 
         if pulse_us <= MID_US {
             // Map [MIN .. MID] → [-1.0 .. 0.0]
@@ -59,45 +47,28 @@ impl Steering {
             (pulse_us - MID_US) as f32 / (MAX_US - MID_US) as f32
         }
     }
-    /// Get the steering value normalised to:
-    /// left: -1f32
-    /// right: -1f32
-    fn get(&self) -> f32 {
-        let pwm_clock = embassy_rp::clocks::clk_sys_freq();
-        let divider: u32 = 16;
 
-        let ticks = self.0.counter() as u32;
-        let pulse_us = (ticks * divider * 1_000_000) / pwm_clock;
+    pub async fn get(&mut self) -> f32 {
+        self.0.wait_for_rising_edge().await;
+        let start = Instant::now();
+        self.0.wait_for_falling_edge().await;
+        let duration = Instant::now().duration_since(start);
 
-        let pulse_us = pulse_us as i32;
+        let pulse_us = duration.as_micros() as i32;
 
-        Self::map_steering(pulse_us as i32).clamp(-1.0, 1.0)
+        Self::map_steering(pulse_us)
     }
 }
-struct Throttle(Pwm<'static>);
+struct Throttle(Input<'static>);
 impl Throttle {
-    fn init(pwm_slice: Peri<'static, PWM_SLICE5>, pwm_pin: Peri<'static, PIN_11>) -> Self {
-        let pwm_clock = embassy_rp::clocks::clk_sys_freq();
-        let divider: u8 = 16;
-        let freq = 100;
-        let top = (pwm_clock / (freq * divider as u32)) - 1;
-        let mut c = embassy_rp::pwm::Config::default();
-        c.top = top as u16;
-        c.divider = divider.into();
-        let throttle = Pwm::new_input(
-            pwm_slice,
-            pwm_pin,
-            embassy_rp::gpio::Pull::None,
-            embassy_rp::pwm::InputMode::Level,
-            c.clone(),
-        );
-        Throttle(throttle)
+    fn init(pin: ThrottlePin) -> Self {
+        Throttle(Input::new(pin, embassy_rp::gpio::Pull::None))
     }
 
     fn map_throttle(pulse_us: i32) -> f32 {
-        const MIN_US: i32 = 1000;
-        const MID_US: i32 = 1500;
-        const MAX_US: i32 = 2000;
+        const MIN_US: i32 = 1050;
+        const MID_US: i32 = 1400;
+        const MAX_US: i32 = 1850;
 
         if pulse_us <= MID_US {
             // Map [MIN .. MID] → [-1.0 .. 0.0]
@@ -108,16 +79,15 @@ impl Throttle {
         }
     }
 
-    /// Get the speed of the throttle
-    fn get(&self) -> Speed {
-        let pwm_clock = embassy_rp::clocks::clk_sys_freq();
-        let divider: u32 = 16;
+    pub async fn get(&mut self) -> Speed {
+        self.0.wait_for_rising_edge().await;
+        let start = Instant::now();
+        self.0.wait_for_falling_edge().await;
+        let duration = Instant::now().duration_since(start);
 
-        let ticks = self.0.counter() as u32;
-        let pulse_us = (ticks * divider * 1_000_000) / pwm_clock;
+        let pulse_us = duration.as_micros() as i32;
+        defmt::info!("pulse_us: {:?}", pulse_us);
 
-        let pulse_us = pulse_us as i32;
-
-        Speed::from_percent(Self::map_throttle(pulse_us as i32))
+        Speed::from_percent(Self::map_throttle(pulse_us))
     }
 }

@@ -42,10 +42,10 @@ type RightMotor = (
 #[derive(Copy, Clone)]
 pub struct Speed(f32);
 impl Speed {
-    const OFF: Self = Speed(0.);
-    const MAX_FORWARD: Self = Speed(1.);
-    const MAX_REVERSE: Self = Speed(-1.);
-    //
+    pub const OFF: Self = Speed(0.);
+    pub const MAX_FORWARD: Self = Speed(1.);
+    pub const MAX_REVERSE: Self = Speed(-1.);
+
     pub fn from_percent(val: f32) -> Self {
         Self(val.clamp(-1., 1.))
     }

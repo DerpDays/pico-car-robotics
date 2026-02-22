@@ -4,21 +4,23 @@
 #![no_main]
 
 use embassy_executor::Spawner;
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 
 use crate::controller::Controller;
-use crate::motor::{Motors, Speed};
+use crate::motor::Motors;
 use crate::wifi::Wifi;
 
-// use panic_halt as _;
 use {defmt_rtt as _, panic_probe as _};
 
 mod controller;
+
+mod display;
 pub mod motor;
 mod wifi;
 
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
+    I2C0_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
 });
 
 #[embassy_executor::main]
@@ -40,46 +42,31 @@ async fn main(spawner: Spawner) {
                 (p.PWM_SLICE2, p.PIN_4, p.PIN_5),
                 (p.PWM_SLICE3, p.PIN_6, p.PIN_7),
             ),
-            Controller::init((p.PWM_SLICE4, p.PIN_9), (p.PWM_SLICE5, p.PIN_11)),
+            Controller::init(p.PIN_9, p.PIN_11),
         ))
-        .unwrap();
+        .expect("failed to spawn motor driver");
 
-    let delay = embassy_time::Duration::from_secs(1);
+    if let Ok(display) = display::Display::new((p.I2C0, p.PIN_1, p.PIN_0)).await {
+        spawner
+            .spawn(display::drive_display(display))
+            .expect("failed to spawn display driver");
+    }
+
+    let delay = Duration::from_millis(10000);
     loop {
-        // defmt::info!("led on!");
-        wifi_s.control.gpio_set(0, true).await;
-        Timer::after(delay).await;
-
-        // defmt::info!("led off!");
-        wifi_s.control.gpio_set(0, false).await;
+        // wifi_s.control.gpio_set(0, true).await;
         Timer::after(delay).await;
     }
+    //
+    // wifi_s.control.gpio_set(0, false).await;
+    // Timer::after(delay).await;
+    // }
 }
 
 #[embassy_executor::task]
 async fn drive_motors_from_controller(mut motors: Motors, mut controller: Controller) {
-    let mut a = 0.;
-    let mut direction = true;
     loop {
-        let speed = if direction {
-            if a >= 1. {
-                direction = false;
-            } else {
-                a += 0.01;
-            }
-            Speed::from_percent(a)
-        } else {
-            if a <= -1. {
-                direction = true;
-            } else {
-                a -= 0.01;
-            }
-            Speed::from_percent(a)
-        };
+        let speed = controller.get_throttle().await;
         motors.drive_speed(speed, speed);
-        Timer::after_millis(10).await;
     }
 }
-
-// CH1 steering
-// CH2 throttle
