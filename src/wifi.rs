@@ -15,6 +15,11 @@ pub async fn cyw43_task(
     runner.run().await
 }
 
+#[embassy_executor::task]
+pub async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+    runner.run().await
+}
+
 const FIRMWARE: &[u8] = include_bytes!("../cyw43-firmware/43439A0.bin");
 pub const CLM: &[u8] = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
 
