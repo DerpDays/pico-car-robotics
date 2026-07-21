@@ -872,6 +872,7 @@ dependencies = [
  "oled_async",
  "panic-probe",
  "portable-atomic",
+ "smoltcp",
  "static_cell",
 ]
 

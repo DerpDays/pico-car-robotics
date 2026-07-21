@@ -1,30 +1,27 @@
-#![feature(type_alias_impl_trait)]
-#![feature(impl_trait_in_assoc_type)]
 #![no_std]
 #![no_main]
 
 use core::net::Ipv4Addr;
-use core::str::{FromStr, from_utf8};
+use core::str::from_utf8;
 
-use cyw43::JoinOptions;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
-use embassy_net::udp::UdpSocket;
-use embassy_net::{Ipv4Cidr, Stack, StackResources, StaticConfigV4};
+use embassy_net::{Stack, StackResources};
 use embassy_rp::clocks::RoscRng;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
-use heapless::Vec;
 use static_cell::StaticCell;
 
 use crate::controller::Controller;
-use crate::motor::Motors;
+use crate::motor::{Motors, Speed};
 use crate::wifi::{Wifi, cyw43_task, net_task};
 
 use {defmt_rtt as _, panic_probe as _};
 
 mod controller;
+mod leasehund;
+use leasehund::DhcpServer;
 
 mod display;
 pub mod motor;
@@ -37,6 +34,23 @@ embassy_rp::bind_interrupts!(struct Irqs {
 
 struct PioContext {}
 
+#[embassy_executor::task]
+async fn dhcp_task(stack: embassy_net::Stack<'static>) {
+    // Create the DHCP server configuration
+    // The generic parameters <32, 4> mean: max 32 clients, max 4 DNS servers
+    let mut dhcp_server: DhcpServer<32, 4> = DhcpServer::new_with_dns(
+        Ipv4Addr::new(192, 168, 1, 1),   // Server IP (Your Pico's IP)
+        Ipv4Addr::new(255, 255, 255, 0), // Subnet mask
+        Ipv4Addr::new(192, 168, 1, 1),   // Gateway IP (Your Pico)
+        Ipv4Addr::new(8, 8, 8, 8),       // DNS server (e.g., Google DNS)
+        Ipv4Addr::new(192, 168, 1, 50),  // IP pool start (First IP to assign)
+        Ipv4Addr::new(192, 168, 1, 200), // IP pool end (Last IP to assign)
+    );
+
+    // Run the DHCP server in an infinite loop
+    dhcp_server.run(stack).await;
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -44,24 +58,15 @@ async fn main(spawner: Spawner) {
 
     let mut wifi = Wifi::init(p.PIN_23, p.PIN_24, p.PIN_25, p.PIN_29, p.DMA_CH0, p.PIO0).await;
     spawner.spawn(cyw43_task(wifi.runner)).unwrap();
-
     wifi.control.init(wifi::CLM).await;
-    wifi.control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
-        .await;
 
-    let mut dns_servers: Vec<Ipv4Addr, 3> = Vec::new();
-    _ = dns_servers.push(Ipv4Addr::from_str(env!("WIFI_DNS_SERVER")).expect("valid dns server"));
-    let config = embassy_net::Config::ipv4_static(StaticConfigV4 {
-        address: Ipv4Cidr::new(
-            Ipv4Addr::from_str(env!("WIFI_ADDRESS")).expect("invalid wifi address"),
-            24,
-        ),
-        gateway: Some(
-            Ipv4Addr::from_str(env!("WIFI_GATEWAY_ADDRESS")).expect("invalid wifi gateway address"),
-        ),
-        dns_servers,
+    // Use a link-local address for communication without DHCP server
+    let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+        address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 1, 1), 24),
+        dns_servers: heapless::Vec::new(),
+        gateway: None,
     });
+
     let seed = rng.next_u64();
     static RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(
@@ -71,37 +76,14 @@ async fn main(spawner: Spawner) {
         seed,
     );
     spawner.spawn(net_task(runner)).unwrap();
+    spawner.spawn(dhcp_task(stack)).unwrap();
+    wifi.control
+        .set_power_management(cyw43::PowerManagementMode::Performance)
+        .await;
 
-    let mac_address = wifi.control.address().await;
-    info!(
-        "Mac address: {:X}:{:X}:{:X}:{:X}:{:X}:{:X}",
-        mac_address[0],
-        mac_address[1],
-        mac_address[2],
-        mac_address[3],
-        mac_address[4],
-        mac_address[5],
-    );
-
-    info!("Waiting to connect to wifi: {}", env!("WIFI_SSID"));
-    while let Err(err) = wifi
-        .control
-        .join(
-            env!("WIFI_SSID"),
-            JoinOptions::new(env!("WIFI_PASSWORD").as_bytes()),
-        )
-        .await
-    {
-        info!("failed to join network: {:?}", err.status);
-    }
-    info!("Connected to wifi network {}", env!("WIFI_SSID"));
-
-    info!("Waiting for up wifi link up");
-    stack.wait_link_up().await;
-    info!("Waiting for up wifi config");
-    stack.wait_config_up().await;
-    info!("Done connecting to wifi");
-    wifi.control.gpio_set(0, true).await;
+    wifi.control
+        .start_ap_wpa2("PICO CAR AAAAA", "password", 5)
+        .await;
 
     spawner
         .spawn(drive_motors_from_udp(
@@ -146,11 +128,12 @@ async fn drive_motors_from_udp(mut motors: Motors, stack: Stack<'static>) {
     let mut buf = [0; 4096];
 
     loop {
+        motors.drive_speed(Speed::OFF, Speed::OFF);
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));
+        socket.set_timeout(Some(Duration::from_secs(5)));
 
-        info!("Listening on TCP:1234...");
-        if let Err(e) = socket.accept(1234).await {
+        info!("Listening on TCP:8133...");
+        if let Err(e) = socket.accept(8133).await {
             defmt::warn!("accept error: {:?}", e);
             continue;
         }
@@ -169,12 +152,30 @@ async fn drive_motors_from_udp(mut motors: Motors, stack: Stack<'static>) {
                     break;
                 }
             };
+            match buf.first().map(|x| *x as char) {
+                Some('w') => {
+                    motors.drive_speed(Speed::from_percent(1.), Speed::from_percent(1.));
+                }
+                Some('s') => {
+                    motors.drive_speed(Speed::from_percent(-1.), Speed::from_percent(-1.));
+                }
+                Some('a') => {
+                    motors.drive_speed(Speed::from_percent(0.), Speed::from_percent(1.));
+                }
+                Some('d') => {
+                    motors.drive_speed(Speed::from_percent(1.), Speed::from_percent(0.));
+                }
+                _ => {
+                    motors.drive_speed(Speed::from_percent(0.), Speed::from_percent(0.));
+                }
+            }
 
             info!("rxd {}", from_utf8(&buf[..n]).unwrap());
 
             match socket.write_all(&buf[..n]).await {
                 Ok(()) => {}
                 Err(e) => {
+                    motors.drive_speed(Speed::OFF, Speed::OFF);
                     defmt::warn!("write error: {:?}", e);
                     break;
                 }
